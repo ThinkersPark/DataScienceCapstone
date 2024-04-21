@@ -1,0 +1,246 @@
+---
+title: 'Data Science Capstone: Progress Report (Week 2)'
+author: "ThinkersPark"
+date: "2024-04-21"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction & Data Load
+
+This is a progress report on data analysis and next word prediction model for JHU Data Science Capstone course (week 2).
+
+The analysis is done in R version 4.1.2 (2021-11-01), Platform: x86_64-w64-mingw32/x64 (64-bit), Running under: Windows 10 x64 (build 19045).
+
+It is based on the data downloaded from the url below. The download part of the code is not executed here (it only needs to be executed once at download). 
+
+```{r datadownload, eval=FALSE, echo=TRUE} 
+sessionInfo()
+
+fileUrl = "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+temp <- tempfile()
+download.file(fileUrl,temp)
+unzip(zipfile=temp,exdir="./data")
+unlink(temp) 
+
+```
+
+The function *choose.files()* can be used to browse through the data and define the path to the selected language folder. Data is saved as corpus `myCorp` (cached due to its size).
+
+```{r corpus, echo=TRUE, cache=TRUE} 
+library("tm")
+
+## choose.files(default= "/*.*")
+path <- "./data/final/en_US"
+
+myCorp <- VCorpus(DirSource(path, encoding ="UTF-8"),
+                   readerControl = list(reader = readPlain, language="en-US"))
+```
+
+## Data Preview & Initial Analysis
+
+### Preview of the data size & structure:
+
+```{r initanalysis1, echo=TRUE}
+
+## A quick summary
+summary(myCorp)
+
+## A more detailed view of the corpus structure with 3 docs
+tm::inspect(myCorp)
+
+## Accessing each doc's meta
+myCorp[[1]]$meta
+myCorp[[2]]$meta
+myCorp[[3]]$meta
+
+## Getting each doc's size
+file.info(paste0(path,"/",myCorp[[1]]$meta$id))$size
+file.info(paste0(path,"/",myCorp[[2]]$meta$id))$size
+file.info(paste0(path,"/",myCorp[[3]]$meta$id))$size
+
+## Getting each doc's maximum number of characters in a line
+max(nchar(myCorp[[1]]$content))
+max(nchar(myCorp[[2]]$content))
+max(nchar(myCorp[[3]]$content))
+
+```
+
+### A look at the first couple of lines for each document:
+
+```{r initanalysis2, echo=TRUE, fig.width=8}
+
+## Checking if the lines are not too long
+nchar(myCorp[[1]]$content[1:5])
+nchar(myCorp[[2]]$content[1:5])
+nchar(myCorp[[3]]$content[1:5])
+
+## Looking at the first couple of lines
+head(myCorp[[1]]$content,2)
+head(myCorp[[2]]$content,3)
+head(myCorp[[3]]$content,5)
+
+```
+
+### A preview of most frequent words in a sample:
+
+```{r initanalysis3, echo=TRUE, cache=TRUE, warning=FALSE}
+
+## Generating term-document matrix for a sample
+sample <- c(myCorp[[1]]$content[1:100],myCorp[[2]]$content[1:100],myCorp[[3]]$content[1:100])
+
+myControl <- list(tokenize="words", 
+                  tolower=TRUE,
+                  removePunctuation = TRUE,
+                  removeNumbers = TRUE,
+                  stopwords=FALSE,
+                  stemming=FALSE
+                  )
+
+tdms <- TermDocumentMatrix(sample, control = myControl)
+
+## Preview of top 10 frequency words
+inspect(tdms)
+
+## Words which occur at least 50 times
+findFreqTerms(tdms, 50)
+
+```
+
+
+## Prototype Prediction Model
+
+The prototype model is based on markov chain representation of words and their successors. It is based on a 300-line sample constructed above, tokenised. 
+
+### Tokenising the sample
+
+Why not recycle the term-document matrix? This is because, by applying *TermDocumentMatrix()* function, the word succession order is lost - instead an order-preserving tokenising operation is required.
+
+Additionally, the first word in any given line should not be considered as the successor of the last word in the previous line - this is achieved by adding "eol" (end of line) line-break word at the end of each line ("eol" is otherwise not present in the sample).
+
+Stopwords deliberately not removed and stemming not applied, if the purpose is to find the most likely successor to any given word. Profanity words also not filtered out at this time.
+
+```{r protomodel1, echo=TRUE, cache=TRUE, warning=FALSE}
+library(tokenizers)
+
+## Bookmark end the line with "eol" (not otherwise present in the sample)
+grep("eol",sample)
+sample <- gsub("$"," eol", sample)
+
+## Tokenise (using the same tokeniser as in tdm)
+tks <- tokenize_words(
+  sample,
+  lowercase = TRUE,
+  strip_punct = TRUE,
+  strip_numeric = TRUE,
+  stopwords = NULL,
+  simplify = FALSE
+)
+
+unltks <- unlist(tks)
+unitks <- unique(unltks)
+unitks <- unitks[-match("eol",unique(unltks))]
+
+```
+
+The same tokeniser type ("words") is chosen as in *TermDocumentMatrix()*, with the same parameters (lower case, handling punctuation, numbers, stopwords, etc.). However, it is clear different tokenising functions work differently, esp. with words in quotation marks or otherwise mixed with punctuation (see e.g. how the word "comedy" is handled).
+
+```{r tokencare, echo=TRUE}
+
+sample[grep("comedy",sample)]
+unitks[grep("comedy",unitks)]
+rownames(tdms)[grep("comedy",rownames(tdms))]
+
+```
+
+### Prototype model
+
+The prototype model generates, for every unique word in the tokenised, the frequency vector of its successors based on the frequency of those successors appearing in the sample. The resulting object is a frequency matrix `frmatsample`, where:
+
+- For any given word (row names), its successors in the sample (column names) have Non-zero frequencies,
+- Its non-successors (column names) have zero frequencies.
+
+The code takes approx. 4mins to run, and is not evaluated here. It has only been run once, and data saved for further loading.
+
+
+```{r protomodel2, eval=FALSE, echo=TRUE, cache=TRUE}
+
+sf <- list()
+frmatsample <- c()
+
+## Building a matrix of successor frequencies, 
+## Words in rows/ their successors in columns
+
+s_start <- Sys.time()
+
+for (i in 1:length(unitks)){
+  
+  w <- which(unitks[i]==unltks)+1
+  if (w[length(w)]>length(unltks)) w <- w[1:(length(w)-1)]
+  
+  sf[[i]] <- termFreq(unltks[w]) 
+  if ("eol" %in% names(sf[[i]])) sf[[i]]<-sf[[i]][-match("eol",names(sf[[i]]))]
+  
+  frmatsample <- rbind(frmatsample,rep(0,length(unitks)))
+  v <- match(names(sf[[i]]),unitks)
+  frmatsample[i,v] <- sf[[i]]
+  
+}
+
+frmatsample <- as.matrix(frmatsample)
+colnames(frmatsample) <- as.vector(unitks)
+rownames(frmatsample) <- as.vector(unitks)
+
+s_end <- Sys.time()
+s_end - s_start
+
+save(frmatsample, file="frmatsample.RData")
+
+```
+
+### Ploting the most frequent successors for a chosen word:
+
+```{r protomodel3, echo=TRUE}
+
+load("frmatsample.RData")
+
+## Find successors for a selected word, e.g. "you"
+myword <- "you"
+
+successors <- frmatsample[match(myword,rownames(frmatsample)),
+                         which(frmatsample[match(myword,rownames(frmatsample)),]>1)]
+
+## Plot frequencies of occurring after the selected word (based on the sample)
+barplot(sort(successors,decreasing=TRUE),main=c(paste0("Most likely next words after \"",myword,"\" :"),
+                                                     "(based on the sample)"), 
+        xlab="",ylab="Frequency", ylim=c(0,max(successors)))
+
+```
+
+## Summary & Potential Next Steps
+
+This report summarises the basic features of the data, and explores the idea of using Markov Chains to find the most likely successor to any given word. 
+
+In the final project, the full dataset will need to be split into adequate training/ testing sets, and the ultimate training set is likely to be quite large, requiring fast and efficient code.
+
+The analysis may be easier using markovchain R package (https://cran.r-project.org/web/packages/markovchain/index.html, will require R 4.2). Also, there may be alternative prediction methods taught later in the course.
+
+### Some observations:
+
+- The sample used in this report is a combined sample across all datasets. Depending on the intended application, it may be more helpful to have an environment-specific prediction model, where the environment is either news, blogs, or twitter.
+
+- There is likely a more elegant (and faster) way to prevent the first word in any given line from being considered as the successor of the last word in the previous line. Using "eol" as "line-break word" is just one way of solving the problem.
+
+- Various functions use different tokenisation models/ parameters, e.g. *TermDocumentMatrix()* (tokeniser in embedded *termFreq()* function when called) vs. *tokenize_words()*. They may differ even though, at a high level, the key parameters are the same (e.g. handling numbers, punctuation, etc.).
+
+- For the prediction model, the documents need to be tokenised in an order-preserving fashion, to successfully analyse word successors/ predecessors.
+
+- A small probability mass (perhaps controlled by a parameter) may need to be assigned (perhaps in a uniformly distributed fashion) to words which were never successors in the training set, but could be in reality.
+
+- Once the prediction model work is complete, the project will require an app interface where user can input text and receive suggestions for the next word in the process.
+
